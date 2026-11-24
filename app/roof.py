@@ -489,9 +489,20 @@ def measure_edges(facets: list[Facet], footprint: Polygon, grid: Grid) -> dict[s
 
 # ------------------------------------------------------------------ main entry
 def measure_roof(xyz, cls, target_xy) -> RoofResult:
-    """Measure the building nearest target_xy."""
-    roof, _, classified = isolate_building(xyz, cls, target_xy)
-    return measure_cluster(roof, classified)
+    """Measure the building nearest target_xy (falling back to the next nearest ones)."""
+    clusters, classified = building_clusters(xyz, cls)
+    near = sorted(((float(np.hypot(c[:, 0] - target_xy[0], c[:, 1] - target_xy[1]).min()), k)
+                   for k, c in enumerate(clusters)))
+    near = [(d, k) for d, k in near if d <= 15.0]
+    if not near:
+        raise NoRoofFound("No building within 15 m of this location.")
+    last = None
+    for _, k in near[:4]:
+        try:
+            return measure_cluster(clusters[k], classified)
+        except NoRoofFound as e:
+            last = e
+    raise last
 
 
 def measure_cluster(roof: np.ndarray, classified: bool = True) -> RoofResult:
@@ -500,7 +511,14 @@ def measure_cluster(roof: np.ndarray, classified: bool = True) -> RoofResult:
     if not classified:
         warnings.append("LiDAR here has no building class; trees near the roof may affect results.")
 
-    facets = segment_planes(roof)
+    # Real surveys are noisier than they look; loosen the fit step by step if needed.
+    facets = []
+    for dist_tol, angle in ((0.15, 15.0), (0.25, 25.0), (0.4, 35.0)):
+        facets = segment_planes(roof, dist_tol=dist_tol, angle_tol_deg=angle)
+        if facets:
+            if dist_tol > 0.15:
+                warnings.append("LiDAR here is noisy; pitch may be off by about 1/12.")
+            break
     if not facets:
         raise NoRoofFound("Could not find roof planes in the LiDAR points.")
     facets = merge_coplanar(facets)

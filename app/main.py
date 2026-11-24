@@ -84,12 +84,15 @@ class Location(BaseModel):
 
     @model_validator(mode="after")
     def need_one(self):
-        if self.address is None and (self.lat is None or self.lon is None):
+        if not self.address and (self.lat is None or self.lon is None):
             raise ValueError("Send an address, or lat and lon.")
         return self
 
     def resolve(self) -> tuple[float, float]:
-        return (self.lat, self.lon) if self.lat is not None else geocode(self.address)
+        # an address wins over lat/lon left at 0 (the /docs example form fills in zeros)
+        if self.address and (self.lat in (None, 0) or self.lon in (None, 0)):
+            return geocode(self.address)
+        return self.lat, self.lon
 
 
 class TracedFacet(BaseModel):
@@ -326,6 +329,63 @@ def structure_at_pin(pin: Pin):
     }
     _cache_put(key, result)
     return result
+
+
+@app.post("/debug", dependencies=[Depends(require_key)])
+def debug(loc: Location):
+    """What the LiDAR looks like at an address: counts, heights, structures found."""
+    from .roof import building_clusters, segment_planes
+    lat, lon = loc.resolve()
+    try:
+        lp = fetch_points(lat, lon, radius_m=35)
+    except LookupError as e:
+        return {"lat": lat, "lon": lon, "error": str(e)}
+    to_utm = Transformer.from_crs("EPSG:4326", lp.utm_crs, always_xy=True)
+    tx, ty = to_utm.transform(lon, lat)
+    xyz, cls = lp.xyz, lp.classification
+    clusters, classified = building_clusters(xyz, cls)
+    out = []
+    for c in clusters:
+        d = float(np.hypot(c[:, 0] - tx, c[:, 1] - ty).min())
+        out.append({"points": len(c), "distance_m": round(d, 1),
+                    "z_min": round(float(c[:, 2].min()), 2), "z_max": round(float(c[:, 2].max()), 2),
+                    "planes_found_strict": len(segment_planes(c)) if len(c) >= 12 else 0,
+                    "planes_found_loose": len(segment_planes(c, 0.4, 35.0)) if len(c) >= 12 else 0})
+    out.sort(key=lambda o: o["distance_m"])
+    area = float(np.ptp(xyz[:, 0]) * np.ptp(xyz[:, 1])) if len(xyz) else 0
+    return {
+        "lat": lat, "lon": lon, "dataset": lp.dataset, "year": lp.year,
+        "points": int(len(xyz)), "points_per_m2": round(len(xyz) / max(area, 1), 2),
+        "classes": {int(k): int(v) for k, v in zip(*np.unique(cls, return_counts=True))},
+        "z_range": [round(float(xyz[:, 2].min()), 2), round(float(xyz[:, 2].max()), 2)] if len(xyz) else None,
+        "building_class_used": classified,
+        "structures_nearest_first": out[:8],
+    }
+
+
+@app.post("/debug-points", dependencies=[Depends(require_key)])
+def debug_points(loc: Location):
+    """Download the raw LiDAR points around an address as a .laz file (to send for checking)."""
+    import io
+    import laspy
+    from fastapi.responses import Response
+    lat, lon = loc.resolve()
+    try:
+        lp = fetch_points(lat, lon, radius_m=35)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    hdr = laspy.LasHeader(point_format=6, version="1.4")
+    hdr.scales = [0.01, 0.01, 0.01]
+    hdr.offsets = lp.xyz.min(axis=0)
+    hdr.add_crs(lp.utm_crs)
+    las = laspy.LasData(hdr)
+    las.x, las.y, las.z = lp.xyz[:, 0], lp.xyz[:, 1], lp.xyz[:, 2]
+    las.classification = lp.classification
+    buf = io.BytesIO()
+    las.write(buf, do_compress=True)
+    name = f"points_{lat:.5f}_{lon:.5f}.laz"
+    return Response(buf.getvalue(), media_type="application/octet-stream",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @app.post("/measure-traced", dependencies=[Depends(require_key)])
