@@ -1,0 +1,10 @@
+fastapi==0.115.*
+uvicorn[standard]==0.32.*
+httpx==0.27.*
+numpy>=1.26
+scipy>=1.11
+scikit-learn>=1.4
+shapely>=2.0
+pyproj>=3.6
+laspy[lazrs]>=2.5
+overturemaps>=2.1
