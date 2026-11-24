@@ -26,6 +26,7 @@ from .roof import (FT_PER_M, SQFT_PER_M2, NoRoofFound, RoofResult, building_clus
                    cluster_outline, measure_cluster)
 
 PRIMARY_MIN_M2 = 93.0          # ~1,000 sq ft: treated as a house
+MAIN_MIN_M2 = 51.0             # ~550 sq ft: smallest building picked as the main house
 ACCESSORY_MAX_DIST_M = 30.5    # 100 ft from the main house
 MAIN_MAX_DIST_M = 30.0         # address point must be within ~100 ft of a structure
 MIN_PIECE_M2 = 10.0            # ignore smaller mismatches (~110 sq ft)
@@ -129,7 +130,13 @@ def assign_ownership(structures: list[Structure], address_xy) -> int | None:
     whole = [s for s in structures if s.parent is None]
     if not whole:
         return None
-    main = min(whole, key=lambda s: (s.outline.distance(here), -s.outline.area))
+    # A garage, carport or shed is often closer to the street than the house, and address
+    # lookups often land in the street. So the main building is the nearest house-sized one
+    # (550+ sq ft), unless the address point sits right on a smaller structure.
+    on_it = [s for s in whole if s.outline.distance(here) < 0.5]
+    big = [s for s in whole if s.outline.area >= MAIN_MIN_M2]
+    pool = on_it or big or whole
+    main = min(pool, key=lambda s: (s.outline.distance(here), -s.outline.area))
     if main.outline.distance(here) > MAIN_MAX_DIST_M:
         for s in structures:
             s.role, s.included = "other", False

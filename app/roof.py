@@ -19,6 +19,7 @@ CELL = 0.5                       # raster cell size for areas (m)
 OFFSET_A, OFFSET_B = 0.60, -0.20 # outline push-out vs point spacing (calibrated)
 
 GROUND, BUILDING, WATER = 2, 6, 9
+VEGETATION = {3, 4, 5}
 NOISE = {7, 18}
 
 
@@ -106,11 +107,17 @@ def building_points(xyz, cls):
         ground = xyz[xyz[:, 2] <= np.percentile(xyz[:, 2], 5)]
     _, gi = cKDTree(ground[:, :2]).query(xyz[:, :2], k=min(8, len(ground)))
     hag = xyz[:, 2] - np.median(ground[gi, 2], axis=1)
-    # unclassified data: anything 2 m+ above ground, then drop trees by roughness
-    cand = xyz[(hag > 2.0) & ~np.isin(cls, [GROUND, WATER, *NOISE])]
+    # unclassified data: anything 2 m+ above ground that isn't vegetation, then drop
+    # what's left of trees by roughness
+    cand = xyz[(hag > 2.0) & ~np.isin(cls, [GROUND, WATER, *VEGETATION, *NOISE])]
     if len(cand) >= 20:
         _, curv = _normals(cand)
-        cand = cand[curv < 0.02]
+        smooth = curv < max(0.02, 2.5 * float(np.median(curv)))
+        if smooth.sum() >= 10:
+            # ridge, hip and valley points look "rough" too: keep rough points that sit
+            # right next to smooth roof, so the roof doesn't fall apart into single faces
+            d, _ = cKDTree(cand[smooth, :2]).query(cand[:, :2])
+            cand = cand[smooth | (d < 1.0)]
     return cand, False
 
 
@@ -491,9 +498,12 @@ def measure_edges(facets: list[Facet], footprint: Polygon, grid: Grid) -> dict[s
 def measure_roof(xyz, cls, target_xy) -> RoofResult:
     """Measure the building nearest target_xy (falling back to the next nearest ones)."""
     clusters, classified = building_clusters(xyz, cls)
-    near = sorted(((float(np.hypot(c[:, 0] - target_xy[0], c[:, 1] - target_xy[1]).min()), k)
+    def area(c):
+        return len(np.unique(np.floor(c[:, :2]).astype(int), axis=0))   # ~m², 1 m cells
+    # nearest house-sized structure first: a carport or garage is often nearer the street
+    near = sorted(((area(c) < 51, float(np.hypot(c[:, 0] - target_xy[0], c[:, 1] - target_xy[1]).min()), k)
                    for k, c in enumerate(clusters)))
-    near = [(d, k) for d, k in near if d <= 15.0]
+    near = [(d, k) for _, d, k in near if d <= 15.0]
     if not near:
         raise NoRoofFound("No building within 15 m of this location.")
     last = None

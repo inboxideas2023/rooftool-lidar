@@ -143,7 +143,15 @@ def _read_tile(url: str, box) -> tuple[np.ndarray, np.ndarray]:
     las = laspy.read(io.BytesIO(_get_bytes(url)))
     x, y, z = np.asarray(las.x), np.asarray(las.y), np.asarray(las.z)
     m = (x >= box[0]) & (x <= box[2]) & (y >= box[1]) & (y <= box[3])
-    return np.column_stack([x[m], y[m], z[m]]), np.asarray(las.classification)[m]
+    cls = np.asarray(las.classification).astype(np.uint8)[m]
+    try:
+        nret = np.asarray(las.number_of_returns)[m]
+        # Unlabelled points from a pulse that came back more than once went through
+        # something (leaves). Roofs give a single return. Label those as vegetation.
+        cls = np.where((cls <= 1) & (nret > 1), 5, cls).astype(np.uint8)
+    except Exception:
+        pass
+    return np.column_stack([x[m], y[m], z[m]]), cls
 
 
 def fetch_points(lat: float, lon: float, radius_m: float = 35.0,
